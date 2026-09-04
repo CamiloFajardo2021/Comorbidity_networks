@@ -62,18 +62,20 @@ The platform provides an end-to-end pipeline:
 comorbidity-platform/
 
 ├── backend/
-│   ├── app/
-│   ├── etl/
-│   ├── graph/
-│   └── api/
+|   ├── main
+│   ├── models/
+│   ├── routers/
+│   ├── services/
+│   └── DB/
 │
 ├── frontend/
 │
 ├── mongodb/
 │
-├── data/
-│   ├── raw/
-│   └── processed/
+├── etl/
+│   ├── Logs/
+│   ├── pipeline2.py
+|   ├── logs_.py
 │
 ├── docs/
 │
