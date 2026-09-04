@@ -1,0 +1,134 @@
+# Comorbidity Networks - deployment stack (single Ubuntu server)
+#
+# Layout on disk (create these as they're built):
+#   ./backend   -> FastAPI app (Dockerfile)
+#   ./frontend  -> React/Vite app (Dockerfile)
+#   ./etl       -> ETL job image (Dockerfile), reads raw RIPS/BDUA files
+#   ./nginx     -> nginx.conf (reverse proxy)
+#   ./logs      -> etl log output (bind mount)
+#
+# Copy .env.example to .env and set real credentials before deploying.
+
+services:
+  mongodb:
+    image: mongo:8
+    container_name: mongodb
+    restart: unless-stopped
+    ports:
+      # Bound to localhost only: reachable via SSH tunnel for admin tools,
+      # never exposed to the public internet directly.
+      - "127.0.0.1:27017:27017"
+    environment:
+      MONGO_INITDB_ROOT_USERNAME: ${MONGO_ROOT_USER:-admin}
+      MONGO_INITDB_ROOT_PASSWORD: ${MONGO_ROOT_PASSWORD:?set MONGO_ROOT_PASSWORD in .env}
+    volumes:
+      # Bind-mounted onto the external drive (data set is large / multi-year).
+      # Before first run, on the host:
+      #   1. docker run --rm mongo:8 id mongodb        # get the real UID:GID
+      #   2. sudo mkdir -p /mnt/<external-drive>/mongodb_data
+      #   3. sudo chown -R <uid>:<gid> /mnt/<external-drive>/mongodb_data
+      #   4. confirm the drive is in /etc/fstab (survives reboot) and formatted ext4/xfs
+      # TODO: replace with the real mount path once the drive is prepared.
+      - /mnt/mongodb_data:/data/db
+    networks:
+      - app_network
+    healthcheck:
+      test: ["CMD", "mongosh", "--eval", "db.adminCommand('ping')"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  redis:
+    image: redis:7-alpine
+    container_name: redis
+    restart: unless-stopped
+    # Pure cache for graph JSON responses (services/graph_service.py,
+    # the frontend-facing path) — nothing here needs to survive a
+    # restart, so persistence is explicitly disabled rather than left at
+    # Redis's noisy default snapshotting.
+    command: redis-server --save "" --appendonly no
+    networks:
+      - app_network
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  backend:
+    build: ./backend
+    container_name: backend
+    restart: unless-stopped
+    depends_on:
+      mongodb:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    environment:
+      MONGO_URI: mongodb://${MONGO_ROOT_USER:-admin}:${MONGO_ROOT_PASSWORD:?set MONGO_ROOT_PASSWORD in .env}@mongodb:27017
+      REDIS_URL: redis://redis:6379/0
+      # Graph download cache (services/graph_service.py). No volume on
+      # purpose — this is a warm cache for the container's uptime only,
+      # not meant to survive a redeploy. Still grows during that uptime
+      # though, so it wants a periodic sweep (age- or size-based), not
+      # "no eviction needed" just because it isn't persisted.
+      CACHE_DIR: /cache
+    expose:
+      - "8000"
+    networks:
+      - app_network
+
+  frontend:
+    build: ./frontend
+    container_name: frontend
+    restart: unless-stopped
+    depends_on:
+      - backend
+    expose:
+      - "80"
+    networks:
+      - app_network
+
+  nginx:
+    image: nginx:latest
+    container_name: nginx
+    restart: unless-stopped
+    depends_on:
+      - frontend
+      - backend
+    ports:
+      - "80:80"
+    volumes:
+      - ./nginx/nginx.conf:/etc/nginx/nginx.conf:ro
+    networks:
+      - app_network
+
+  etl:
+    build: ./etl
+    container_name: etl
+    # One-off/batch job (run with `docker compose run etl ...`), not a
+    # long-lived service, so it should not be restarted in a loop.
+    restart: "no"
+    depends_on:
+      mongodb:
+        condition: service_healthy
+    environment:
+      MONGO_URI: mongodb://${MONGO_ROOT_USER:-admin}:${MONGO_ROOT_PASSWORD:?set MONGO_ROOT_PASSWORD in .env}@mongodb:27017
+      DATA_PATH: /data
+      PARQUET_PATH: /parquet
+      LOG_PATH: /logs
+    volumes:
+      # TODO: replace with the real mount point of the external drive
+      # (the "administrator_root" space) on the Ubuntu server, e.g.
+      # /mnt/rips_data or /media/<disk-label>. Read-only: the ETL should
+      # never be able to modify the source files.
+      - /mnt/rips_data:/data:ro
+      - ./parquet:/parquet
+      - ./logs:/logs
+    networks:
+      - app_network
+
+
+networks:
+  app_network:
+    driver: bridge
