@@ -8,6 +8,7 @@ import os
 import argparse
 from pathlib import Path
 import polars as pl
+import logging
 
 # ------------------------
 # Deployment config — from the container's environment (docker-compose.yaml)
@@ -40,25 +41,78 @@ filepath_rips = DATA_DIR / f"RIPS_{ANIO}.txt"
 filepath_bdua = DATA_DIR / f"BDUA_{ANIO}_{int(ANIO) + 2}.txt" #2014-2016 , 2017-2019 , 2019-2023
 path_diag_rels = DATA_DIR / f"UNAL_{ANIO}.txt"   # confirm this matches the real filename on the drive
 
+# ------------------------
+# LOG settings
+# ------------------------
+
+# ------------------------
+# LOG settings
+# ------------------------
+import logging
+from logging.handlers import RotatingFileHandler
+import sys
+
+LOG_DIR = Path(os.environ["LOG_PATH"])  # /logs — bind-mounted, so logs survive container restarts
+LOG_DIR.mkdir(parents=True, exist_ok=True)
+
+logger = logging.getLogger("etl.pipeline2")
+logger.setLevel(logging.INFO)
+
+if not logger.handlers:  # guard against duplicate handlers if this module ever gets imported twice
+    formatter = logging.Formatter(
+        "%(asctime)s | %(levelname)-8s | %(message)s",
+        datefmt="%Y-%m-%d %H:%M:%S",
+    )
+
+    # One file per run (anio + municipios), so separate `docker compose run` invocations
+    # don't interleave into a single giant log.
+    municipios_tag = "-".join(MUNICIPIO)
+    log_file = LOG_DIR / f"pipeline2_{ANIO}_{municipios_tag}.log"
+
+    file_handler = RotatingFileHandler(
+        log_file, maxBytes=10 * 1024 * 1024, backupCount=3, encoding="utf-8"
+    )
+    file_handler.setFormatter(formatter)
+    logger.addHandler(file_handler)
+
+    # Mirror to stdout too, so `docker compose logs etl` still shows it live
+    # (RotatingFileHandler alone would only write to /logs).
+    stream_handler = logging.StreamHandler()
+    stream_handler.setFormatter(formatter)
+    logger.addHandler(stream_handler)
+
+
+def _log_uncaught_exceptions(exc_type, exc_value, exc_traceback):
+    if issubclass(exc_type, KeyboardInterrupt):
+        sys.__excepthook__(exc_type, exc_value, exc_traceback)
+        return
+    logger.critical("Unhandled exception", exc_info=(exc_type, exc_value, exc_traceback))
+
+sys.excepthook = _log_uncaught_exceptions
 
 
 # ------------------------
 # Filter big raw file RIPS-year for municipio and save as parquet
 # ------------------------
 def parquet_pre(mun: str):
+    logger.info("Parquet creation")
     outdir = PARQUET_DIR / f"municipio={mun}"
     outdir.mkdir(parents=True, exist_ok=True)
 
-    (
-        pl.scan_csv(filepath_rips, separator='|',
-                    encoding="utf8-lossy",
-                    ignore_errors=True,
-                    infer_schema_length=10000,
-                    null_values=["", "NULL", "null", "NA", "N/A", "."],
-                    truncate_ragged_lines=True)
-        .filter(pl.col("MunicipioCD") == mun)
-        .sink_parquet(outdir / "data.parquet")
-    )
+    try:
+        (
+            pl.scan_csv(filepath_rips, separator='|',
+                        encoding="utf8-lossy",
+                        ignore_errors=True,
+                        infer_schema_length=10000,
+                        null_values=["", "NULL", "null", "NA", "N/A", "."],
+                        truncate_ragged_lines=True)
+            .filter(pl.col("MunicipioCD") == mun)
+            .sink_parquet(outdir / "data.parquet")
+        )
+        logger.info(f"Parquet save successfull in {outdir}")
+    except Exception as e:
+        logger.error(f"Error to save parquet")
 
 
 
@@ -368,6 +422,8 @@ def get_df_final(municipio, db):
 
     BATCH = 1000  # fixed
 
+    logger.info(f"BACH SIZE : {BATCH}")
+
     if logs.get_status(municipio, ANIO) == LogStatus.ERROR:
         batch_start = logs.get_batch_int(municipio, ANIO)
     else:
@@ -397,11 +453,12 @@ def get_df_final(municipio, db):
 
     else:
         logs.write_log(LogsFormat(municipio=municipio, anio=ANIO, status=LogStatus.PROCESSED))
+        logger.info(f"Batch number process : {i}")
 
 
 
     
-    print(f"Municipio {municipio}_{ANIO} cargado exitosamente")
+    logger.info(f"Municipio {municipio}_{ANIO} cargado exitosamente")
 
     return
 
