@@ -210,3 +210,17 @@ etl_ingest.py export create_parquet(municipios,anio) , ingest_DB(municipio,logg)
     if __name__ == "__main__":
         main()
 
+
+
+`05/09/2026`
+
+**REDIS layer for the frontend (update DOCKERFILE) and CACHE files for API graphs**
+ 1. It adds a download option for a graph given a filters (in order to avoid potential risk of identification of patients) it limits the size of the graph.
+ 2. If users want to download the same graph (same filtes) in a relative small window of time it create a cache to avoid proccessing.
+ 3. In the frontend given the necessity of access graphs , it deploys a redis layer.
+
+**ETL process : Logs and binnacles**
+
+
+
+
