@@ -221,6 +221,17 @@ etl_ingest.py export create_parquet(municipios,anio) , ingest_DB(municipio,logg)
 
 **ETL process : Logs and binnacles**
 
+It creates a logging for each running in the ETL, and also it implement (to do) a general binnacles, which purpose is to track the successfull loads into
+the mongoDB database, its schema is
+
+|municipio|2014|2015|2016|2017|2018|2019|2020|2021|2022|2023|status|
+
+**Backend directories**
+
+The /models directory is not use but in case of need of scale move the dependency.py pydantic models to \models.
+
+
+
 
 
 
