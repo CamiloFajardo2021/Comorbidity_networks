@@ -13,7 +13,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from motor.motor_asyncio import AsyncIOMotorClient
 
-from routers import analytics, graph, patients
+from routers import analytics, graph
 
 MONGO_URI = os.environ["MONGO_URI"]
 MONGO_DB_NAME = os.environ.get("MONGO_DB_NAME", "rips_db")
