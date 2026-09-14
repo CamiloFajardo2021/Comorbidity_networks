@@ -13,7 +13,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from motor.motor_asyncio import AsyncIOMotorClient
 
-from routers import analytics, graph
+from routers import analytics, graph, patients
 
 MONGO_URI = os.environ["MONGO_URI"]
 MONGO_DB_NAME = os.environ.get("MONGO_DB_NAME", "rips_db")
@@ -24,6 +24,14 @@ async def lifespan(app: FastAPI):
     # startup: one connection pool, shared for the app's whole lifetime
     app.state.mongo_client = AsyncIOMotorClient(MONGO_URI)
     app.state.db = app.state.mongo_client[MONGO_DB_NAME]
+
+    # Compound index covering the two filters present in nearly every query
+    # (see query_utils.build_patient_match) — municipio narrows the most,
+    # so it leads; anio is the other filter almost always combined with it.
+    # create_index is idempotent, so this is safe to run on every startup.
+    await app.state.db.patients.create_index(
+        [("municipioConsulta", 1), ("anio", 1)]
+    )
 
     yield
 
