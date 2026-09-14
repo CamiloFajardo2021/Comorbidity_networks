@@ -3,7 +3,7 @@ import os
 from pathlib import Path
 from pymongo import MongoClient
 from pymongo.errors import BulkWriteError
-from logs_ import LogsMongoDB,LogsFormat,LogStatus
+from logs_ import LogsMongoDB,LogsFormat,LogStatus,Binnacle
 import os
 import argparse
 from pathlib import Path
@@ -107,12 +107,12 @@ def parquet_pre(mun: str):
                         infer_schema_length=10000,
                         null_values=["", "NULL", "null", "NA", "N/A", "."],
                         truncate_ragged_lines=True)
-            .filter(pl.col("MunicipioCD") == mun)
+            .filter(pl.col("MunicipioCD") == int(mun))
             .sink_parquet(outdir / "data.parquet")
         )
         logger.info(f"Parquet save successfull in {outdir}")
     except Exception as e:
-        logger.error(f"Error to save parquet")
+        logger.error(f"Error to save parquet {e}")
 
 
 
@@ -374,7 +374,7 @@ def get_df_final(municipio, db):
             pl.first("ActividadEconomicaDesc")
             .alias("actividad_economica"),
 
-            pl.col("DescNuevoRegistro")
+            pl.col("discapacidad")
             .drop_nulls()
             .first(),
 
@@ -404,6 +404,11 @@ def get_df_final(municipio, db):
             + "_"
 
             + pl.col("anio")
+                .cast(pl.Utf8)
+
+            + "_"
+
+            + pl.col("municipioAfiliacion")
                 .cast(pl.Utf8)
 
         ).alias("_id")
@@ -459,6 +464,8 @@ def get_df_final(municipio, db):
 
     
     logger.info(f"Municipio {municipio}_{ANIO} cargado exitosamente")
+
+    Binnacle.insert_(municipio=municipio,anio=ANIO)
 
     return
 
