@@ -15,18 +15,32 @@ from pydantic import BaseModel, Field, field_validator
 
 
 class CommonFilters(BaseModel):
-    municipio: Optional[int] = None
+    municipioAfiliacion: Optional[int] = None 
+    municipioConsulta: Optional[int] = None
     regimen: Optional[str] = Field(default=None, pattern=r"^\d$")
     sexo: Optional[str] = Field(default=None, pattern="^[FM]$")
     anio: Optional[str] = Field(default=None, pattern=r"^\d{4}$")
     edad_min: Optional[int] = Field(default=None, ge=0)
     edad_max: Optional[int] = Field(default=None, ge=0)
     tipo_evento: Optional[str] = Field(default=None, pattern="^[CUPH]$")
+    # TODO: "^[FM]$" was copy-pasted from `sexo` and is wrong for ethnicity
+    # codes - swap in the real valid values once you have them; max_length
+    # alone (matching actividad_economica's style) is a safe placeholder.
+    etnia: Optional[str] = Field(default=None, max_length=30)
+    zona: Optional[str] = Field(default=None, pattern="^[UR]$")
+    actividad_economica: Optional[str] = Field(default=None, max_length=30)
+    discapacidad: Optional[list[str]] = None
+    discapacidad_ant: Optional[str] = None
 
-    # NOTE: docs/05_backend_api.md also lists `regimen` (C/S) as a filter,
-    # but the current patient schema (schema_mongodb.txt) has no regimen
-    # field on the document — the ETL doesn't capture it yet. Left out
-    # here until that's resolved; adding it back is a one-line change.
+    @field_validator("discapacidad", mode="before")
+    @classmethod
+    def split_discapacidad_csv(cls, value):
+        # Lets ?discapacidad=fisica,visual work as shorthand alongside the
+        # standard repeated-param form ?discapacidad=fisica&discapacidad=visual
+        # (both are valid ways to send a list to a Depends()-flattened field).
+        if isinstance(value, str):
+            return [v.strip() for v in value.split(",") if v.strip()]
+        return value
 
 
 class WeightEnum(str, Enum):
