@@ -2,17 +2,17 @@
 
 ## Infrastructure
 - [x] Create MongoDB container
-- [ ] Create backend container
-- [ ] Create frontend container
+- [x] Create backend container
+- [x] Create frontend container
 
 ## ETL
 - [x] Read TXT files
 - [x] Merge BDUA
-- [ ] Logging
-- [ ] Incremental ingestion
+- [x] Logging
+- [x] Incremental ingestion
 
 ## Database
-- [ ] Design indexes
+- [x] Design indexes
 - [ ] Optimize queries
 
 ## Graph
