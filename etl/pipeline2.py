@@ -42,9 +42,9 @@ filepath_rips = DATA_DIR / f"RIPS_{ANIO}.txt"
 if ANIO in (2014,2015,2016):
     filepath_bdua = DATA_DIR / f"BDUA_2014_2016.txt"
 elif ANIO in (2017,2018,2019,2020):
-    filepath_bdua = DATA_DIR / f"BDUA_2017_2019.txt"
+    filepath_bdua = DATA_DIR / f"BDUA_2017_2020.txt"
 elif ANIO in (2021,2022,2023,2024):
-    filepath_bdua = DATA_DIR / f"BDUA_2019_2023.txt"
+    filepath_bdua = DATA_DIR / f"BDUA_2021_2024.txt"
 else:
     raise ValueError("EL año debe estar entre 2014 a 2023")
 
