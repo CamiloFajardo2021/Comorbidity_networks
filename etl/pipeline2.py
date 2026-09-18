@@ -293,6 +293,10 @@ def get_df_final(municipio, db):
         .alias("COD_DIAG_R3")
     ])
 
+    matches = [x for x in df.columns if x.lower() == "finalidadconsultacd"]
+    assert len(matches) == 1, f"expected exactly one FinalidadConsultaCD column, found {matches}"
+    finalidad_consulta_header = matches[0]
+
     df = df.with_columns(
 
         pl.struct([
@@ -340,7 +344,7 @@ def get_df_final(municipio, db):
             pl.col("TipoDiagnosticoPrincipalCD").
             alias("tipo_diagnostico"),
 
-            pl.col("FinalidadConsultaCD").
+            pl.col( finalidad_consulta_header).
             alias("finalidad_consulta"),
 
             pl.col("Prestador").
