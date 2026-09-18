@@ -38,7 +38,16 @@ MUNICIPIO = args.municipios   # always a list from here on, length 1 or more
 # Raw file paths — same naming convention as etl_ingest.py
 # ------------------------
 filepath_rips = DATA_DIR / f"RIPS_{ANIO}.txt"
-filepath_bdua = DATA_DIR / f"BDUA_{ANIO}_{int(ANIO) + 2}.txt" #2014-2016 , 2017-2019 , 2019-2023
+#filepath_bdua = DATA_DIR / f"BDUA_{ANIO}_{int(ANIO) + 2}.txt" #2014-2016 , 2017-2019 , 2019-2023
+if ANIO in (2014,2015,2016):
+    filepath_bdua = DATA_DIR / f"BDUA_2014_2016.txt"
+elif ANIO in (2017,2018,2019):
+    filepath_bdua = DATA_DIR / f"BDUA_2017_2019.txt"
+elif ANIO in (2020,2021,2022,2023):
+    filepath_bdua = DATA_DIR / f"BDUA_2019_2023.txt"
+else:
+    raise ValueError("EL año debe estar entre 2014 a 2023")
+
 path_diag_rels = DATA_DIR / f"UNAL_{ANIO}.txt"   # confirm this matches the real filename on the drive
 
 # ------------------------
