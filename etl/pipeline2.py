@@ -195,10 +195,20 @@ def bdua_and_diag_rel_load(ANIO :str):
     )
 
     diag_rel = diag_rel.with_columns(
-        pl.col("FECHA_CONSUL")
-        .str.replace_all("-", "")
-        .str.slice(0, 8)
-        .alias("FECHA_CONSUL").cast(pl.Int64)
+        pl.when(
+            pl.col("FECHA_CONSUL")
+            .str.replace_all("-", "")
+            .str.slice(0, 8)
+            .str.contains(r"^\d{8}$")
+        )
+        .then(
+            pl.col("FECHA_CONSUL")
+            .str.replace_all("-", "")
+            .str.slice(0, 8)
+            .cast(pl.Int64)
+        )
+        .otherwise(None)
+        .alias("FECHA_CONSUL")
     )
 
     
@@ -293,7 +303,7 @@ def get_df_final(municipio, db):
         .alias("COD_DIAG_R3")
     ])
 
-    matches = [x for x in df.columns if x.lower() == "finalidadconsultacd"]
+    matches = [x for x in df.columns if x.lower() == "finalidadconsultacd"] #change df.columns
     assert len(matches) == 1, f"expected exactly one FinalidadConsultaCD column, found {matches}"
     finalidad_consulta_header = matches[0]
 
@@ -344,7 +354,7 @@ def get_df_final(municipio, db):
             pl.col("TipoDiagnosticoPrincipalCD").
             alias("tipo_diagnostico"),
 
-            pl.col( finalidad_consulta_header).
+            pl.col(finalidad_consulta_header).
             alias("finalidad_consulta"),
 
             pl.col("Prestador").
