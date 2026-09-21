@@ -488,7 +488,7 @@ def get_df_final(municipio, db):
     
     logger.info(f"Municipio {municipio}_{ANIO} cargado exitosamente")
 
-    Binnacle.insert_(municipio=municipio,anio=ANIO)
+    Binnacle().insert_(municipio=municipio,anio=ANIO)
 
     return
 
