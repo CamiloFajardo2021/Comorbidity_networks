@@ -23,7 +23,8 @@ class LogsFormat(BaseModel):
     status: LogStatus = LogStatus.NOT_PROCESSED
     date: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
     error: str | None = None
-    batch_int: int | None = None
+    batch_int: int | None = None # outer: i_0 // N_ROWS for batch proccessing
+    inner_batch_index: int | None = None  # which ops-chunk within that outer batch
 
     @model_validator(mode="after")
     def _check_error_field(self):
@@ -41,8 +42,8 @@ class LogsFormat(BaseModel):
     @classmethod
     def anio_in_range(cls, value: str) -> str:
         year = int(value)
-        if not (2014 <= year <= 2023):
-            raise ValueError(f"anio must be between 2014 and 2023, got {value!r}")
+        if not (2014 <= year <= 2024):
+            raise ValueError(f"anio must be between 2014 and 2024, got {value!r}")
         return value
 
 
@@ -61,12 +62,32 @@ class LogsMongoDB:
         )
         return LogStatus(doc["status"]) if doc else None
 
-    def get_batch_int(self, municipio: str, anio: str) -> int:
+    def get_progress(self, municipio: str, anio: str):
+        """Raw (status, batch_int, inner_batch_index) as last written for this
+        municipio+anio. batch_int/inner_batch_index are None whenever that
+        write never set them -- the final "fully done" marker never sets
+        batch_int, which is exactly what is_fully_processed below relies on.
+        Returns (None, None, None) when there's no log yet."""
         doc = self.collection.find_one(
             {"municipio": municipio, "anio": anio},
-            {"batch_int": 1, "_id": 0},
+            {"status": 1, "batch_int": 1, "inner_batch_index": 1, "_id": 0},
         )
-        return doc.get("batch_int", 0) if doc else 0
+        if not doc:
+            return None, None, None
+        return LogStatus(doc["status"]), doc.get("batch_int"), doc.get("inner_batch_index")
+
+    def is_fully_processed(self, municipio: str, anio: str) -> bool:
+        """True only for the final "this municipio+anio is completely done"
+        marker -- distinguished from a mid-run per-batch/per-chunk PROCESSED
+        log by the absence of batch_int (every in-progress write sets it)."""
+        status, batch_int, _ = self.get_progress(municipio, anio)
+        return status == LogStatus.PROCESSED and batch_int is None
+
+    def get_batch_int(self, municipio: str, anio: str) -> int:
+        """Resume position for the inner BATCH=1000 mongo-insert loop used by
+        get_df_final (the non-batched path). 0 when there's nothing to resume."""
+        _, batch_int, _ = self.get_progress(municipio, anio)
+        return batch_int if batch_int is not None else 0
 
     def write_log(self, log_format: LogsFormat):
         self.collection.update_one(
@@ -130,7 +151,7 @@ class Binnacle:
 
     def check_municipio(self, municipio: str):
         self.__built__()  # make sure the file exists before reading it
-        df = pl.read_csv(self.BINNACLE_FILE, separator="|")
+        df = pl.read_csv(self.BINNACLE_FILE, separator="|", schema_overrides={"municipio": pl.Utf8})
         row = df.filter(pl.col("municipio") == municipio)
 
         if row.is_empty():
