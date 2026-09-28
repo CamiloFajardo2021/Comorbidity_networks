@@ -621,6 +621,11 @@ def get_df_final(municipio, db, diag_rel_pre, bdua_g_2024_pre):
 
             + pl.col("municipioAfiliacion")
                 .cast(pl.Utf8)
+                .fill_null("NA")  # BDUA source can have a null MunicipioCD for a
+                                  # matched patient; string concat with a null
+                                  # operand makes the WHOLE _id null in Polars,
+                                  # not the string "None" -- which collided
+                                  # across patients on Mongo's unique _id index.
 
         ).alias("_id")
     )
@@ -932,6 +937,11 @@ def get_df_final_batches(municipio, db, diag_rel_pre, bdua_g_2024_pre, i_0=0):
 
             + pl.col("municipioAfiliacion")
                 .cast(pl.Utf8)
+                .fill_null("NA")  # BDUA source can have a null MunicipioCD for a
+                                  # matched patient; string concat with a null
+                                  # operand makes the WHOLE _id null in Polars,
+                                  # not the string "None" -- which collided
+                                  # across patients on Mongo's unique _id index.
 
         ).alias("_id")
     )
