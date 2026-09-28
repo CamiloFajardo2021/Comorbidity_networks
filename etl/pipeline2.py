@@ -1,5 +1,6 @@
 import polars as pl
 import os
+import re
 from pathlib import Path
 from pymongo import MongoClient
 from pymongo.errors import BulkWriteError
@@ -15,6 +16,18 @@ import logging
 # ------------------------
 DATA_DIR = Path(os.environ["DATA_PATH"])       # /data — the read-only mount of the external drive
 PARQUET_DIR = Path(os.environ["PARQUET_PATH"]) # /parquet
+
+
+# ------------------------
+# MongoDB hard-caps a single document at 16MB (16777216 bytes). A handful
+# of high-utilization patients can end up with a 'consultas' array large
+# enough to cross that line — MONGO_MAX_DOC_BYTES is the real limit,
+# MAX_SAFE_DOC_BYTES leaves headroom so BSON overhead we don't account for
+# exactly doesn't push us back over it.
+# ------------------------
+MONGO_MAX_DOC_BYTES = 16 * 1024 * 1024
+DOC_SIZE_SAFETY_MARGIN = 2 * 1024 * 1024
+MAX_SAFE_DOC_BYTES = MONGO_MAX_DOC_BYTES - DOC_SIZE_SAFETY_MARGIN
 
 # ------------------------
 # Per-run parameters — from the command line, not the environment
@@ -113,6 +126,143 @@ def _log_uncaught_exceptions(exc_type, exc_value, exc_traceback):
     logger.critical("Unhandled exception", exc_info=(exc_type, exc_value, exc_traceback))
 
 sys.excepthook = _log_uncaught_exceptions
+
+# ------------------------
+# Safety net for MongoDB's 16MB/doc limit
+# ------------------------
+def _doc_size(doc: dict) -> int:
+    try:
+        return len(BSON.encode(doc))
+    except Exception:
+        # If it doesn't even encode, let insert_many surface the real error.
+        return -1
+ 
+ 
+def _chunks_that_fit(base: dict, items: list, max_bytes: int) -> list[list]:
+    """Recursively halve `items` until every chunk, combined with `base`,
+    fits under max_bytes. Shared by split_oversized_doc and by
+    enforce_doc_size_limits (batched path) so both use the same slicing
+    logic."""
+    if not items:
+        return []
+    candidate_size = _doc_size({**base, "consultas": items})
+    if len(items) == 1 or (candidate_size != -1 and candidate_size <= max_bytes):
+        return [items]
+    mid = len(items) // 2
+    return _chunks_that_fit(base, items[:mid], max_bytes) + _chunks_that_fit(base, items[mid:], max_bytes)
+
+
+def split_oversized_doc(doc: dict, max_bytes: int = MAX_SAFE_DOC_BYTES, part_start: int = 1) -> list[dict]:
+    """
+    A patient document is one row per PersonaID with a 'consultas' array
+    holding every consultation/procedure for that patient in that year.
+    For the overwhelming majority of patients that's small, but a data
+    issue upstream (duplicated source rows, a join fan-out — see the
+    dedup added in get_df_final) can leave a handful of patients with a
+    'consultas' array big enough to push the whole document past Mongo's
+    16MB cap.
+
+    Rather than let that document take the whole batch (and, before this
+    fix, the whole remaining run) down, split it into multiple documents
+    that each fit, e.g. "1234567_2024" -> "1234567_2024_part1",
+    "..._part2", ... Patient-level fields are duplicated on every part;
+    only 'consultas' is sliced. This never drops data — worst case, a
+    downstream reader that only fetches _id == "{PersonaID}_{anio}" needs
+    to also glob "{PersonaID}_{anio}_part*" to see the rest.
+
+    part_start lets a caller that's re-splitting an already-partially-split
+    patient (see enforce_doc_size_limits, used by the batched $push path in
+    get_df_final_batches) continue numbering instead of colliding with
+    _partN docs that already exist for this patient.
+    """
+    size = _doc_size(doc)
+    if size == -1 or size <= max_bytes:
+        return [doc]
+
+    consultas = doc.get("consultas") or []
+    if len(consultas) <= 1:
+        # Nothing left to split on — not the array that's causing it.
+        return [doc]
+
+    base = {k: v for k, v in doc.items() if k != "consultas"}
+    base_id = doc["_id"]
+
+    parts = _chunks_that_fit(base, consultas, max_bytes)
+    return [
+        {**base, "consultas": part, "_id": f"{base_id}_part{i}"}
+        for i, part in enumerate(parts, start=part_start)
+    ]
+
+
+_PART_RE = re.compile(r"_part(\d+)$")
+
+
+def _next_part_number(collection, base_id: str) -> int:
+    """Highest existing _partN suffix already stored for this patient, so
+    re-splitting a doc that's been split before doesn't overwrite parts
+    created by an earlier split."""
+    cursor = collection.find(
+        {"_id": {"$regex": f"^{re.escape(base_id)}_part\\d+$"}},
+        {"_id": 1},
+    )
+    max_n = 0
+    for d in cursor:
+        m = _PART_RE.search(d["_id"])
+        if m:
+            max_n = max(max_n, int(m.group(1)))
+    return max_n
+
+
+def enforce_doc_size_limits(collection, ids: list, max_bytes: int = MAX_SAFE_DOC_BYTES) -> list:
+    """
+    Post-$push safety net for the batched path (get_df_final_batches).
+
+    get_df_final can size-check a patient doc before insert because it
+    builds the whole document in memory first. get_df_final_batches instead
+    grows each patient's 'consultas' array incrementally via $push/upsert
+    across many chunks (and possibly many runs), so there's no single point
+    to pre-check size the same way. Instead, after each bulk_write, this
+    cheaply re-checks the size of just the docs that chunk touched (via
+    $bsonSize, which avoids pulling full documents over the wire) and, for
+    any that crossed max_bytes, splits them with split_oversized_doc —
+    mirroring the same belt-and-suspenders check already done in
+    get_df_final.
+
+    The bare _id is abandoned (deleted) in favor of one or more _id_partN
+    docs, consistent with how split_oversized_doc already documents
+    itself. A later chunk that $push'es new consultas for that patient will
+    simply recreate a fresh doc at the bare _id via upsert, which will
+    itself be split again if it grows too far.
+    """
+    if not ids:
+        return []
+
+    sizes = collection.aggregate([
+        {"$match": {"_id": {"$in": ids}}},
+        {"$project": {"size": {"$bsonSize": "$$ROOT"}}},
+    ])
+    oversized_ids = [d["_id"] for d in sizes if d["size"] > max_bytes]
+    if not oversized_ids:
+        return []
+
+    for _id in oversized_ids:
+        doc = collection.find_one({"_id": _id})
+        if doc is None:
+            continue  # already handled/raced; next check will catch it if it recurs
+
+        part_start = _next_part_number(collection, _id) + 1
+        parts = split_oversized_doc(doc, max_bytes=max_bytes, part_start=part_start)
+        if len(parts) <= 1:
+            continue  # single oversized consulta -- nothing more we can do
+
+        collection.delete_one({"_id": _id})
+        collection.insert_many(parts, ordered=False)
+
+    print(
+        f"[warn] {len(oversized_ids)} patient doc(s) exceeded the safe size "
+        f"after $push and were split into _partN docs: {oversized_ids}"
+    )
+    return oversized_ids
 
 
 # ------------------------
@@ -243,11 +393,13 @@ def bdua_for_municipio(municipio):
         .collect()
     )
 
-    d_rel = (diag_rel.join(ids.lazy(), left_on="PersonaBasicaID", right_on="PersonaID", how="semi").collect().lazy())
+    logger.info("Filtering BDUA")
+
+    d_rel = (diag_rel.join(ids.lazy(), left_on="PersonaBasicaID", right_on="PersonaID", how="semi").collect(streaming=True).lazy())
     bdua_rel = (
         bdua_g_2024
         .join(ids.lazy(), on="PersonaID", how="semi")
-        .collect()   # pin it in memory once
+        .collect(streaming=True)   # pin it in memory once
         .lazy()
     )
     
@@ -306,6 +458,8 @@ def get_df_final(municipio, db, diag_rel_pre, bdua_g_2024_pre):
 
         how="left"
     )
+
+    df = df.unique() #avoid exact duplicates
 
     df = df.with_columns([
 
@@ -504,7 +658,28 @@ def get_df_final(municipio, db, diag_rel_pre, bdua_g_2024_pre):
                 pl.col(pl.Float32).fill_nan(None),
             )
             docs = batch.to_dicts()
-            collection.insert_many(docs, ordered=False)
+
+            # Belt-and-suspenders: even after the dedup above, split any
+            # doc that's still over the safe size instead of letting it
+            # take out the batch.
+            safe_docs = []
+            oversized_ids = []
+            for d in docs:
+                parts = split_oversized_doc(d)
+                if len(parts) > 1:
+                    oversized_ids.append(d["_id"])
+                safe_docs.extend(parts)
+ 
+            if oversized_ids:
+                print(
+                    f"[warn] municipio={municipio} anio={ANIO} batch={i}: "
+                    f"{len(oversized_ids)} patient doc(s) exceeded the safe "
+                    f"size and were split into _partN docs: {oversized_ids}"
+                )
+
+
+
+            collection.insert_many(safe_docs, ordered=False)
 
         except Exception as e:
             log_error = LogsFormat(
@@ -513,7 +688,7 @@ def get_df_final(municipio, db, diag_rel_pre, bdua_g_2024_pre):
                 error=str(e)[:50], batch_int=i,
             )
             logs.write_log(log_error)
-            break
+            raise
 
     else:
         logs.write_log(LogsFormat(municipio=municipio, anio=ANIO, status=LogStatus.PROCESSED))
@@ -593,6 +768,8 @@ def get_df_final_batches(municipio, db, diag_rel_pre, bdua_g_2024_pre, i_0=0):
         right_on=["PersonaBasicaID", "FECHA_CONSUL", "COD_DIAG_PRIN", "tipo_letter"],
         how="left",
     )
+
+    df = df.unique()
 
     # ... COD_DIAG_R1/R2/R3 null cleanup and the `consulta` struct build, unchanged ...
 
@@ -789,6 +966,7 @@ def get_df_final_batches(municipio, db, diag_rel_pre, bdua_g_2024_pre, i_0=0):
     }
 
     ops = []
+    op_ids = []  # parallel to ops -- which _id each op targets, for enforce_doc_size_limits
     for doc in docs:
         _id = doc.pop("_id")
         consultas = doc.pop("consultas")
@@ -806,6 +984,7 @@ def get_df_final_batches(municipio, db, diag_rel_pre, bdua_g_2024_pre, i_0=0):
                 upsert=True,
             )
         )
+        op_ids.append(_id)
 
     current_batch_int = i_0 // N_ROWS
 
@@ -821,12 +1000,13 @@ def get_df_final_batches(municipio, db, diag_rel_pre, bdua_g_2024_pre, i_0=0):
     else:
         resume_from = 0
 
-    for j, chunk in enumerate(_chunked(ops, 1000)):
+    for j, (chunk, chunk_ids) in enumerate(zip(_chunked(ops, 1000), _chunked(op_ids, 1000))):
         if j < resume_from:
             continue
 
         try:
             collection.bulk_write(chunk, ordered=False)
+            enforce_doc_size_limits(collection, chunk_ids)
             logs.write_log(LogsFormat(
                 municipio=municipio, anio=ANIO, status=LogStatus.PROCESSED,
                 batch_int=current_batch_int, inner_batch_index=j,
@@ -845,14 +1025,18 @@ def get_df_final_batches(municipio, db, diag_rel_pre, bdua_g_2024_pre, i_0=0):
 #ANIO
 if __name__ == "__main__":
 
+    logger.info("Iniciando")
+
     client = MongoClient(os.environ["MONGO_URI"])
     db = client["rips_db"]
     logs = LogsMongoDB(db)
 
+    logger.info("Cargando BDUA y DIAG_REL")
     bdua_and_diag_rel_load(ANIO)
 
     for municipio in MUNICIPIO:
         if logs.is_fully_processed(municipio, ANIO):
+            logger.info("Procesado")
             continue
 
         parquet_pre(municipio)
