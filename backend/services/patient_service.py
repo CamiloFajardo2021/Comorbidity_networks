@@ -51,6 +51,15 @@ async def patients_path(db, filters: GraphFilters) -> pl.DataFrame:
     exploded = (
         df
         .rename({"_id": "patient_id"})
+        # A patient whose document crossed Mongo's 16MB cap gets split into
+        # multiple documents by etl/pipeline2.py's split_oversized_doc
+        # (_id, _id_part1, _id_part2, ...). Strip that suffix here, before
+        # explode/consulta_id synthesis below, so every downstream consumer
+        # (graph_service's co-occurrence counts, diagnosis prevalence, N
+        # normalization, the MIN_PATIENT_COUNT disclosure guard, and the
+        # patients_path CSV export) sees one row per real patient instead
+        # of treating each part as a separate patient.
+        .with_columns(pl.col("patient_id").str.replace(r"_part\d+$", ""))
         .explode("consultas")
         .unnest("consultas")
     )
