@@ -8,7 +8,7 @@ docs/05_backend_api.md.
 import re
 
 from routers.dependencies import CommonFilters
-from services.query_utils import build_patient_match
+from services.query_utils import build_patient_match, canonical_patient_id_expr
 
 
 async def get_general_info(db, filters: CommonFilters) -> dict:
@@ -27,6 +27,7 @@ async def get_general_info(db, filters: CommonFilters) -> dict:
         {"$facet": {
             "summary": [
                 {"$project": {
+                    "patient_key": canonical_patient_id_expr(),
                     "consulta_count": {
                         "$size": {
                             "$filter": {
@@ -36,6 +37,15 @@ async def get_general_info(db, filters: CommonFilters) -> dict:
                             }
                         }
                     }
+                }},
+                # Collapse a split patient's part-documents back into one
+                # row before counting -- otherwise a patient split into
+                # _part1/_part2 (see etl/pipeline2.py's split_oversized_doc)
+                # would be counted as 2+ patients and their per-part
+                # consulta_count would skew the average.
+                {"$group": {
+                    "_id": "$patient_key",
+                    "consulta_count": {"$sum": "$consulta_count"},
                 }},
                 {"$group": {
                     "_id": None,
@@ -86,9 +96,17 @@ async def get_disease_info(db, diag_code: str, filters: CommonFilters) -> dict:
         {"$facet": {
             "summary": [
                 {"$project": {
+                    "patient_key": canonical_patient_id_expr(),
                     "consulta_count": {
                         "$size": {"$filter": {"input": "$consultas", "as": "c", "cond": consulta_cond}}
                     }
+                }},
+                # Collapse a split patient's part-documents back into one
+                # row before counting -- see the identical note in
+                # get_general_info above.
+                {"$group": {
+                    "_id": "$patient_key",
+                    "consulta_count": {"$sum": "$consulta_count"},
                 }},
                 {"$group": {
                     "_id": None,
@@ -136,8 +154,14 @@ async def get_temporal_info(db, filters: CommonFilters) -> dict:
         pipeline.append({"$match": {"consultas.tipo_evento": filters.tipo_evento}})
 
     pipeline += [
+        # Collapse a split patient's part-documents into one timeline
+        # before windowing -- otherwise $setWindowFields would partition
+        # at the _part boundary (see etl/pipeline2.py's split_oversized_doc)
+        # and silently drop the gap between the last consulta of one part
+        # and the first of the next.
+        {"$addFields": {"patient_key": canonical_patient_id_expr()}},
         {"$setWindowFields": {
-            "partitionBy": "$_id",
+            "partitionBy": "$patient_key",
             "sortBy": {"consultas.fecha": 1},
             "output": {
                 "prev_fecha": {"$shift": {"output": "$consultas.fecha", "by": -1}},
