@@ -7,6 +7,14 @@ helpers.
 from routers.dependencies import CommonFilters
 
 
+def canonical_patient_id_expr(id_field: str = "$_id") -> dict:
+    """Mongo aggregation expression stripping a trailing _partN suffix
+    (added by etl/pipeline2.py's split_oversized_doc for any patient doc
+    that crossed Mongo's 16MB cap), so a split patient still collapses to
+    one logical id for counting, grouping, and $setWindowFields."""
+    return {"$arrayElemAt": [{"$split": [id_field, "_part"]}, 0]}
+
+
 def build_patient_match(filters: CommonFilters) -> dict:
     """Patient-level (top-of-document) $match stage - everything here is
     a field directly on the patient document, not inside `consultas`."""
