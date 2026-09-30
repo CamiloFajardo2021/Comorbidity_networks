@@ -33,6 +33,22 @@ async def lifespan(app: FastAPI):
         [("municipioConsulta", 1), ("anio", 1)]
     )
 
+    # Mirrors the index above for the other independent, commonly-used
+    # municipio filter (CommonFilters exposes municipioAfiliacion and
+    # municipioConsulta as separate optional query params) -- without this,
+    # a query filtering by municipioAfiliacion alone falls back to a full
+    # collection scan.
+    await app.state.db.patients.create_index(
+        [("municipioAfiliacion", 1), ("anio", 1)]
+    )
+
+    # Multikey index on the array-of-subdocuments path consultas.diag_prin.
+    # get_disease_info matches this field with an anchored prefix regex
+    # (e.g. "^L23"), which MongoDB CAN serve from a btree index -- without
+    # it, that query has to scan every consulta of every already-matched
+    # patient by brute force.
+    await app.state.db.patients.create_index("consultas.diag_prin")
+
     yield
 
     # shutdown: release it cleanly
