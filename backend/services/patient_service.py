@@ -30,11 +30,27 @@ async def patients_path(db, filters: GraphFilters) -> pl.DataFrame:
     pipeline = [
         {"$match": match},
         # Only ever pull patient id (implicit) + consultas — every other
-        # field (sexo, edad, etnia, ...) only existed to decide *which*
-        # patients qualify, and that's already settled by $match above.
+        # top-level field (sexo, edad, etnia, ...) only existed to decide
+        # *which* patients qualify, and that's already settled by $match
+        # above. Within consultas itself, $map trims each subdocument down
+        # to the 4 fields actually used below (fecha/diag_prin/diag_rel/
+        # tipo_evento) instead of shipping the full ~13-field struct
+        # (costo_consulta, prestador, codigo_procedimiento, ...) across the
+        # wire for every matching consulta of every matching patient.
         {"$project": {
             "consultas": {
-                "$filter": {"input": "$consultas", "as": "c", "cond": consulta_cond}
+                "$map": {
+                    "input": {
+                        "$filter": {"input": "$consultas", "as": "c", "cond": consulta_cond}
+                    },
+                    "as": "c",
+                    "in": {
+                        "fecha": "$$c.fecha",
+                        "diag_prin": "$$c.diag_prin",
+                        "diag_rel": "$$c.diag_rel",
+                        "tipo_evento": "$$c.tipo_evento",
+                    },
+                }
             }
         }},
         # drop patients left with zero consultas after that filter

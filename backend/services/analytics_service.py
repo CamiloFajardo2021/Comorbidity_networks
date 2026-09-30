@@ -22,6 +22,11 @@ async def get_general_info(db, filters: CommonFilters) -> dict:
 
     pipeline = [
         {"$match": match},
+        # Trim to only what summary/top_diagnoses actually read below
+        # (diag_prin, tipo_evento) before the $facet fan-out -- $facet runs
+        # both sub-pipelines independently over whatever comes out of here,
+        # so anything dropped now is work neither branch has to redo.
+        {"$project": {"consultas.diag_prin": 1, "consultas.tipo_evento": 1}},
         # $facet runs both sub-pipelines against the same filtered patient
         # set in a single round trip to Mongo, instead of two queries.
         {"$facet": {
@@ -93,6 +98,8 @@ async def get_disease_info(db, diag_code: str, filters: CommonFilters) -> dict:
 
     pipeline = [
         {"$match": match},
+        # Same trim as get_general_info -- see its comment above.
+        {"$project": {"consultas.diag_prin": 1, "consultas.tipo_evento": 1}},
         {"$facet": {
             "summary": [
                 {"$project": {
@@ -149,7 +156,15 @@ async def get_temporal_info(db, filters: CommonFilters) -> dict:
     without pulling everything into Python to compute it by hand."""
     match = build_patient_match(filters)
 
-    pipeline = [{"$match": match}, {"$unwind": "$consultas"}]
+    pipeline = [
+        {"$match": match},
+        # Trim to only fecha/tipo_evento/dias_estancia -- the three
+        # consulta fields this function reads -- before the $unwind below
+        # turns every matched patient's every consulta into its own
+        # pipeline document.
+        {"$project": {"consultas.fecha": 1, "consultas.tipo_evento": 1, "consultas.dias_estancia": 1}},
+        {"$unwind": "$consultas"},
+    ]
     if filters.tipo_evento:
         pipeline.append({"$match": {"consultas.tipo_evento": filters.tipo_evento}})
 
